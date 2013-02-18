@@ -140,7 +140,13 @@ void PrintHelp()
 	printf("                             3=Cubic\n");
 
 	printf("\nNeon Options (default GPU):\n");
-	printf("  -enhance       : Enable graphic enhancement\n");
+	printf("  -interlace VALUE : Set interlace mode\n");
+	printf("                     0=Off (Default)\n");
+	printf("                     1=On\n");
+	printf("                     2=Auto\n");
+	printf("  -enhance         : Enable graphic enhancement\n");
+	printf("  -enhancehack     : Enable graphic enhancement speed hack\n");
+	printf("                     Can cause some glithes\n");
 
 	printf("\nGles Options:\n");
 	printf("  -gles_dithering VALUE : Enable/disable dithering [0/1]\n");
@@ -291,6 +297,11 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "-spu_reverb"))           { if (atol(argv[++i]) > 0) iUseReverb = 2; }
 		else if (!strcmp(argv[i], "-spu_interpolation")) 	iUseInterpolation = atol(argv[++i]);
 
+		else if (!strcmp(argv[i],"-interlace")) {
+			int interlace = atol(argv[++i]);
+			if (interlace >= 0 && interlace <= 2)
+				pl_rearmed_cbs.gpu_neon.allow_interlace = interlace;
+		}
 		else if (!strcmp(argv[i], "-enhance")) 			pl_rearmed_cbs.gpu_neon.enhancement_enable = 1;
 		else if (!strcmp(argv[i], "-enhancehack")) 		pl_rearmed_cbs.gpu_neon.enhancement_no_main = 1;
 
