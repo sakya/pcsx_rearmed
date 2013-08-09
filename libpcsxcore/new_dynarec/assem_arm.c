@@ -34,6 +34,12 @@
 char translation_cache[1 << TARGET_SIZE_2] __attribute__((aligned(4096)));
 #endif
 
+#ifndef __MACH__
+#define CALLER_SAVE_REGS 0x100f
+#else
+#define CALLER_SAVE_REGS 0x120f
+#endif
+
 extern int cycle_count;
 extern int last_count;
 extern int pcaddr;
@@ -493,7 +499,7 @@ void alloc_reg(struct regstat *cur,int i,signed char reg)
       }
     }
   }
-  printf("This shouldn't happen (alloc_reg)");exit(1);
+  SysPrintf("This shouldn't happen (alloc_reg)");exit(1);
 }
 
 void alloc_reg64(struct regstat *cur,int i,signed char reg)
@@ -659,7 +665,7 @@ void alloc_reg64(struct regstat *cur,int i,signed char reg)
       }
     }
   }
-  printf("This shouldn't happen");exit(1);
+  SysPrintf("This shouldn't happen");exit(1);
 }
 
 // Allocate a temporary register.  This is done without regard to
@@ -782,7 +788,7 @@ void alloc_reg_temp(struct regstat *cur,int i,signed char reg)
       }
     }
   }
-  printf("This shouldn't happen");exit(1);
+  SysPrintf("This shouldn't happen");exit(1);
 }
 // Allocate a specific ARM register.
 void alloc_arm_reg(struct regstat *cur,int i,signed char reg,char hr)
@@ -899,7 +905,7 @@ u_int genjmp(u_int addr)
   int offset=addr-(int)out-8;
   if(offset<-33554432||offset>=33554432) {
     if (addr>2) {
-      printf("genjmp: out of range: %08x\n", offset);
+      SysPrintf("genjmp: out of range: %08x\n", offset);
       exit(1);
     }
     return 0;
@@ -1033,7 +1039,7 @@ void emit_loadreg(int r, int hr)
 {
 #ifdef FORCE32
   if(r&64) {
-    printf("64bit load in 32bit mode!\n");
+    SysPrintf("64bit load in 32bit mode!\n");
     assert(0);
     return;
   }
@@ -1058,7 +1064,7 @@ void emit_storereg(int r, int hr)
 {
 #ifdef FORCE32
   if(r&64) {
-    printf("64bit store in 32bit mode!\n");
+    SysPrintf("64bit store in 32bit mode!\n");
     assert(0);
     return;
   }
@@ -2627,13 +2633,13 @@ static void restore_regs_all(u_int reglist)
 // Save registers before function call
 static void save_regs(u_int reglist)
 {
-  reglist&=0x100f; // only save the caller-save registers, r0-r3, r12
+  reglist&=CALLER_SAVE_REGS; // only save the caller-save registers, r0-r3, r12
   save_regs_all(reglist);
 }
 // Restore registers after function call
 static void restore_regs(u_int reglist)
 {
-  reglist&=0x100f; // only restore the caller-save registers, r0-r3, r12
+  reglist&=CALLER_SAVE_REGS;
   restore_regs_all(reglist);
 }
 
@@ -3288,7 +3294,7 @@ do_writestub(int n)
     emit_writeword(rt,(int)&dword);
     emit_writeword(r?rth:rt,(int)&dword+4);
 #else
-    printf("STORED_STUB\n");
+    SysPrintf("STORED_STUB\n");
 #endif
   }
   //emit_pusha();
@@ -3397,7 +3403,7 @@ inline_writestub(int type, int i, u_int addr, signed char regmap[], int target, 
     emit_writeword(rt,(int)&dword);
     emit_writeword(target?rth:rt,(int)&dword+4);
 #else
-    printf("STORED_STUB\n");
+    SysPrintf("STORED_STUB\n");
 #endif
   }
   //emit_pusha();
@@ -3720,12 +3726,12 @@ generate_map_const(u_int addr,int reg) {
 
 #else
 
-static int do_tlb_r() { return 0; }
-static int do_tlb_r_branch() { return 0; }
-static int gen_tlb_addr_r() { return 0; }
-static int do_tlb_w() { return 0; }
-static int do_tlb_w_branch() { return 0; }
-static int gen_tlb_addr_w() { return 0; }
+static int do_tlb_r(int a, ...) { return 0; }
+static int do_tlb_r_branch(int a, ...) { return 0; }
+static int gen_tlb_addr_r(int a, ...) { return 0; }
+static int do_tlb_w(int a, ...) { return 0; }
+static int do_tlb_w_branch(int a, ...) { return 0; }
+static int gen_tlb_addr_w(int a, ...) { return 0; }
 
 #endif // DISABLE_TLB
 
@@ -4518,7 +4524,7 @@ static void c2op_assemble(int i,struct regstat *i_regs)
   for(hr=0;hr<HOST_REGS;hr++) {
     if(i_regs->regmap[hr]>=0) reglist_full|=1<<hr;
   }
-  reglist=reglist_full&0x100f;
+  reglist=reglist_full&CALLER_SAVE_REGS;
 
   if (gte_handlers[c2op]!=NULL) {
     need_flags=!(gte_unneeded[i+1]>>63); // +1 because of how liveness detection works
@@ -4536,7 +4542,7 @@ static void c2op_assemble(int i,struct regstat *i_regs)
         int v  = (source[i] >> 15) & 3;
         int cv = (source[i] >> 13) & 3;
         int mx = (source[i] >> 17) & 3;
-        reglist=reglist_full&0x10ff; // +{r4-r7}
+        reglist=reglist_full&(CALLER_SAVE_REGS|0xf0); // +{r4-r7}
         c2op_prologue(c2op,reglist);
         /* r4,r5 = VXYZ(v) packed; r6 = &MX11(mx); r7 = &CV1(cv) */
         if(v<3)
@@ -5414,7 +5420,7 @@ void multdiv_assemble_arm(int i,struct regstat *i_regs)
         assert(m2h>=0);
         assert(m1l>=0);
         assert(m2l>=0);
-        save_regs(0x100f);
+        save_regs(CALLER_SAVE_REGS);
         if(m1l!=0) emit_mov(m1l,0);
         if(m1h==0) emit_readword((int)&dynarec_local,1);
         else if(m1h>1) emit_mov(m1h,1);
@@ -5423,7 +5429,7 @@ void multdiv_assemble_arm(int i,struct regstat *i_regs)
         if(m2h<3) emit_readword((int)&dynarec_local+m2h*4,3);
         else if(m2h>3) emit_mov(m2h,3);
         emit_call((int)&multu64);
-        restore_regs(0x100f);
+        restore_regs(CALLER_SAVE_REGS);
         signed char hih=get_reg(i_regs->regmap,HIREG|64);
         signed char hil=get_reg(i_regs->regmap,HIREG);
         signed char loh=get_reg(i_regs->regmap,LOREG|64);
@@ -5494,7 +5500,7 @@ void multdiv_assemble_arm(int i,struct regstat *i_regs)
         assert(d2h>=0);
         assert(d1l>=0);
         assert(d2l>=0);
-        save_regs(0x100f);
+        save_regs(CALLER_SAVE_REGS);
         if(d1l!=0) emit_mov(d1l,0);
         if(d1h==0) emit_readword((int)&dynarec_local,1);
         else if(d1h>1) emit_mov(d1h,1);
@@ -5503,7 +5509,7 @@ void multdiv_assemble_arm(int i,struct regstat *i_regs)
         if(d2h<3) emit_readword((int)&dynarec_local+d2h*4,3);
         else if(d2h>3) emit_mov(d2h,3);
         emit_call((int)&div64);
-        restore_regs(0x100f);
+        restore_regs(CALLER_SAVE_REGS);
         signed char hih=get_reg(i_regs->regmap,HIREG|64);
         signed char hil=get_reg(i_regs->regmap,HIREG);
         signed char loh=get_reg(i_regs->regmap,LOREG|64);
@@ -5527,7 +5533,7 @@ void multdiv_assemble_arm(int i,struct regstat *i_regs)
         assert(d2h>=0);
         assert(d1l>=0);
         assert(d2l>=0);
-        save_regs(0x100f);
+        save_regs(CALLER_SAVE_REGS);
         if(d1l!=0) emit_mov(d1l,0);
         if(d1h==0) emit_readword((int)&dynarec_local,1);
         else if(d1h>1) emit_mov(d1h,1);
@@ -5536,7 +5542,7 @@ void multdiv_assemble_arm(int i,struct regstat *i_regs)
         if(d2h<3) emit_readword((int)&dynarec_local+d2h*4,3);
         else if(d2h>3) emit_mov(d2h,3);
         emit_call((int)&divu64);
-        restore_regs(0x100f);
+        restore_regs(CALLER_SAVE_REGS);
         signed char hih=get_reg(i_regs->regmap,HIREG|64);
         signed char hil=get_reg(i_regs->regmap,HIREG);
         signed char loh=get_reg(i_regs->regmap,LOREG|64);

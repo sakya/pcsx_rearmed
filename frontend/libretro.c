@@ -5,16 +5,21 @@
  * See the COPYING file in the top-level directory.
  */
 
+#define _GNU_SOURCE 1 // strcasestr
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "../libpcsxcore/misc.h"
 #include "../libpcsxcore/psxcounters.h"
 #include "../libpcsxcore/psxmem_map.h"
 #include "../libpcsxcore/new_dynarec/new_dynarec.h"
+#include "../libpcsxcore/cdrom.h"
+#include "../libpcsxcore/cdriso.h"
 #include "../libpcsxcore/cheat.h"
 #include "../plugins/dfsound/out.h"
+#include "../plugins/dfinput/externals.h"
 #include "cspace.h"
 #include "main.h"
 #include "plugin.h"
@@ -46,6 +51,10 @@ int in_type1, in_type2;
 int in_a1[2] = { 127, 127 }, in_a2[2] = { 127, 127 };
 int in_keystate;
 int in_enable_vibration;
+
+/* PSX max resolution is 640x512, but with enhancement it's 1024x512 */
+#define VOUT_MAX_WIDTH 1024
+#define VOUT_MAX_HEIGHT 512
 
 static void init_memcard(char *mcd_data)
 {
@@ -228,7 +237,24 @@ void out_register_libretro(struct out_driver *drv)
 }
 
 /* libretro */
-void retro_set_environment(retro_environment_t cb) { environ_cb = cb; }
+void retro_set_environment(retro_environment_t cb)
+{
+   static const struct retro_variable vars[] = {
+      { "frameskip", "Frameskip; 0|1|2|3" },
+      { "region", "Region; Auto|NTSC|PAL" },
+#ifdef __ARM_NEON__
+      { "neon_interlace_enable", "Enable interlacing mode(s); disabled|enabled" },
+      { "neon_enhancement_enable", "Enhanced resolution (slow); disabled|enabled" },
+      { "neon_enhancement_no_main", "Enhanced resolution speed hack; disabled|enabled" },
+#endif
+      { NULL, NULL },
+   };
+
+   environ_cb = cb;
+
+   cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void*)vars);
+}
+
 void retro_set_video_refresh(retro_video_refresh_t cb) { video_cb = cb; }
 void retro_set_audio_sample(retro_audio_sample_t cb) { (void)cb; }
 void retro_set_audio_sample_batch(retro_audio_sample_batch_t cb) { audio_batch_cb = cb; }
@@ -248,8 +274,8 @@ void retro_get_system_info(struct retro_system_info *info)
 {
 	memset(info, 0, sizeof(*info));
 	info->library_name = "PCSX-ReARMed";
-	info->library_version = REV;
-	info->valid_extensions = "bin|cue|img|mdf|pbp|cbn";
+	info->library_version = "r19";
+	info->valid_extensions = "bin|cue|img|mdf|pbp|toc|cbn|m3u";
 	info->need_fullpath = true;
 }
 
@@ -260,8 +286,8 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
 	info->timing.sample_rate    = 44100;
 	info->geometry.base_width   = 320;
 	info->geometry.base_height  = 240;
-	info->geometry.max_width    = 640;
-	info->geometry.max_height   = 512;
+	info->geometry.max_width    = VOUT_MAX_WIDTH;
+	info->geometry.max_height   = VOUT_MAX_HEIGHT;
 	info->geometry.aspect_ratio = 4.0 / 3.0;
 }
 
@@ -363,6 +389,7 @@ bool retro_unserialize(const void *data, size_t size)
 	return ret == 0 ? true : false;
 }
 
+/* cheats */
 void retro_cheat_reset(void)
 {
 	ClearAllCheats();
@@ -388,8 +415,215 @@ void retro_cheat_set(unsigned index, bool enabled, const char *code)
 		Cheats[index].Enabled = enabled;
 }
 
+/* multidisk support */
+static bool disk_ejected;
+static unsigned int disk_current_index;
+static unsigned int disk_count;
+static struct disks_state {
+	char *fname;
+	int internal_index; // for multidisk eboots
+} disks[8];
+
+static bool disk_set_eject_state(bool ejected)
+{
+	// weird PCSX API..
+	SetCdOpenCaseTime(ejected ? -1 : (time(NULL) + 2));
+	LidInterrupt();
+
+	disk_ejected = ejected;
+	return true;
+}
+
+static bool disk_get_eject_state(void)
+{
+	/* can't be controlled by emulated software */
+	return disk_ejected;
+}
+
+static unsigned int disk_get_image_index(void)
+{
+	return disk_current_index;
+}
+
+static bool disk_set_image_index(unsigned int index)
+{
+	if (index >= sizeof(disks) / sizeof(disks[0]))
+		return false;
+
+	CdromId[0] = '\0';
+	CdromLabel[0] = '\0';
+
+	if (disks[index].fname == NULL) {
+		SysPrintf("missing disk #%u\n", index);
+		CDR_shutdown();
+
+		// RetroArch specifies "no disk" with index == count,
+		// so don't fail here..
+		disk_current_index = index;
+		return true;
+	}
+
+	SysPrintf("switching to disk %u: \"%s\" #%d\n", index,
+		disks[index].fname, disks[index].internal_index);
+
+	cdrIsoMultidiskSelect = disks[index].internal_index;
+	set_cd_image(disks[index].fname);
+	if (ReloadCdromPlugin() < 0) {
+		SysPrintf("failed to load cdr plugin\n");
+		return false;
+	}
+	if (CDR_open() < 0) {
+		SysPrintf("failed to open cdr plugin\n");
+		return false;
+	}
+
+	if (!disk_ejected) {
+		SetCdOpenCaseTime(time(NULL) + 2);
+		LidInterrupt();
+	}
+
+	disk_current_index = index;
+	return true;
+}
+
+static unsigned int disk_get_num_images(void)
+{
+	return disk_count;
+}
+
+static bool disk_replace_image_index(unsigned index,
+	const struct retro_game_info *info)
+{
+	char *old_fname;
+	bool ret = true;
+
+	if (index >= sizeof(disks) / sizeof(disks[0]))
+		return false;
+
+	old_fname = disks[index].fname;
+	disks[index].fname = NULL;
+	disks[index].internal_index = 0;
+
+	if (info != NULL) {
+		disks[index].fname = strdup(info->path);
+		if (index == disk_current_index)
+			ret = disk_set_image_index(index);
+	}
+
+	if (old_fname != NULL)
+		free(old_fname);
+
+	return ret;
+}
+
+static bool disk_add_image_index(void)
+{
+	if (disk_count >= 8)
+		return false;
+
+	disk_count++;
+	return true;
+}
+
+static struct retro_disk_control_callback disk_control = {
+	.set_eject_state = disk_set_eject_state,
+	.get_eject_state = disk_get_eject_state,
+	.get_image_index = disk_get_image_index,
+	.set_image_index = disk_set_image_index,
+	.get_num_images = disk_get_num_images,
+	.replace_image_index = disk_replace_image_index,
+	.add_image_index = disk_add_image_index,
+};
+
+// just in case, maybe a win-rt port in the future?
+#ifdef _WIN32
+#define SLASH '\\'
+#else
+#define SLASH '/'
+#endif
+
+static char base_dir[PATH_MAX];
+
+static bool read_m3u(const char *file)
+{
+	char line[PATH_MAX];
+	char name[PATH_MAX];
+	FILE *f = fopen(file, "r");
+	if (!f)
+		return false;
+
+	while (fgets(line, sizeof(line), f) && disk_count < sizeof(disks) / sizeof(disks[0])) {
+		if (line[0] == '#')
+			continue;
+		char *carrige_return = strchr(line, '\r');
+		if (carrige_return)
+			*carrige_return = '\0';
+		char *newline = strchr(line, '\n');
+		if (newline)
+			*newline = '\0';
+
+		if (line[0] != '\0')
+		{
+			snprintf(name, sizeof(name), "%s%c%s", base_dir, SLASH, line);
+			disks[disk_count++].fname = strdup(name);
+		}
+	}
+
+	fclose(f);
+	return (disk_count != 0);
+}
+
+static void extract_directory(char *buf, const char *path, size_t size)
+{
+   char *base;
+   strncpy(buf, path, size - 1);
+   buf[size - 1] = '\0';
+
+   base = strrchr(buf, '/');
+   if (!base)
+      base = strrchr(buf, '\\');
+
+   if (base)
+      *base = '\0';
+   else
+   {
+      buf[0] = '.';
+      buf[1] = '\0';
+   }
+}
+
+#ifdef __QNX__
+/* Blackberry QNX doesn't have strcasestr */
+
+/*
+ * Find the first occurrence of find in s, ignore case.
+ */
+char *
+strcasestr(const char *s, const char*find)
+{
+	char c, sc;
+	size_t len;
+
+	if ((c = *find++) != 0) {
+		c = tolower((unsigned char)c);
+		len = strlen(find);
+		do {
+			do {
+				if ((sc = *s++) == 0)
+					return (NULL);
+			} while ((char)tolower((unsigned char)sc) != c);
+		} while (strncasecmp(s, find, len) != 0);
+		s--;
+	}
+	return ((char *)s);
+}
+#endif
+
 bool retro_load_game(const struct retro_game_info *info)
 {
+	size_t i;
+	bool is_m3u = (strcasestr(info->path, ".m3u") != NULL);
+
 #ifdef FRONTEND_SUPPORTS_RGB565
 	enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_RGB565;
 	if (environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt)) {
@@ -397,12 +631,38 @@ bool retro_load_game(const struct retro_game_info *info)
 	}
 #endif
 
+	if (info == NULL || info->path == NULL) {
+		SysPrintf("info->path required\n");
+		return false;
+	}
+
 	if (plugins_opened) {
 		ClosePlugins();
 		plugins_opened = 0;
 	}
 
-	set_cd_image(info->path);
+	for (i = 0; i < sizeof(disks) / sizeof(disks[0]); i++) {
+		if (disks[i].fname != NULL) {
+			free(disks[i].fname);
+			disks[i].fname = NULL;
+		}
+		disks[i].internal_index = 0;
+	}
+
+	disk_current_index = 0;
+	extract_directory(base_dir, info->path, sizeof(base_dir));
+
+	if (is_m3u) {
+		if (!read_m3u(info->path)) {
+			SysPrintf("failed to read m3u file\n");
+			return false;
+		}
+	} else {
+		disk_count = 1;
+		disks[0].fname = strdup(info->path);
+	}
+
+	set_cd_image(disks[0].fname);
 
 	/* have to reload after set_cd_image for correct cdr plugin */
 	if (LoadPlugins() == -1) {
@@ -419,6 +679,7 @@ bool retro_load_game(const struct retro_game_info *info)
 	}
 
 	plugin_call_rearmed_cbs();
+	dfinput_activate();
 
 	Config.PsxAuto = 1;
 	if (CheckCdrom() == -1) {
@@ -433,6 +694,15 @@ bool retro_load_game(const struct retro_game_info *info)
 		return false;
 	}
 	emu_on_new_cd(0);
+
+	// multidisk images
+	if (!is_m3u) {
+		disk_count = cdrIsoMultidiskCount < 8 ? cdrIsoMultidiskCount : 8;
+		for (i = 1; i < sizeof(disks) / sizeof(disks[0]) && i < cdrIsoMultidiskCount; i++) {
+			disks[i].fname = strdup(info->path);
+			disks[i].internal_index = i;
+		}
+	}
 
 	return true;
 }
@@ -453,12 +723,18 @@ unsigned retro_get_region(void)
 
 void *retro_get_memory_data(unsigned id)
 {
-	return Mcd1Data;
+	if (id == RETRO_MEMORY_SAVE_RAM)
+		return Mcd1Data;
+	else
+		return NULL;
 }
 
 size_t retro_get_memory_size(unsigned id)
 {
-	return MCD_SIZE;
+	if (id == RETRO_MEMORY_SAVE_RAM)
+		return MCD_SIZE;
+	else
+		return 0;
 }
 
 void retro_reset(void)
@@ -486,11 +762,87 @@ static const unsigned short retro_psx_map[] = {
 };
 #define RETRO_PSX_MAP_LEN (sizeof(retro_psx_map) / sizeof(retro_psx_map[0]))
 
+static void update_variables(bool in_flight)
+{
+   struct retro_variable var;
+   
+   var.value = NULL;
+   var.key = "frameskip";
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) || var.value)
+      pl_rearmed_cbs.frameskip = atoi(var.value);
+
+   var.value = NULL;
+   var.key = "region";
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) || var.value)
+   {
+      Config.PsxAuto = 0;
+      if (strcmp(var.value, "Automatic") == 0)
+         Config.PsxAuto = 1;
+      else if (strcmp(var.value, "NTSC") == 0)
+         Config.PsxType = 0;
+      else if (strcmp(var.value, "PAL") == 0)
+         Config.PsxType = 1;
+   }
+#ifdef __ARM_NEON__
+   var.value = "NULL";
+   var.key = "neon_interlace_enable";
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) || var.value)
+   {
+      if (strcmp(var.value, "disabled") == 0)
+         pl_rearmed_cbs.gpu_neon.allow_interlace = 0;
+      else if (strcmp(var.value, "enabled") == 0)
+         pl_rearmed_cbs.gpu_neon.allow_interlace = 1;
+   }
+
+   var.value = NULL;
+   var.key = "neon_enhancement_enable";
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) || var.value)
+   {
+      if (strcmp(var.value, "disabled") == 0)
+         pl_rearmed_cbs.gpu_neon.enhancement_enable = 0;
+      else if (strcmp(var.value, "enabled") == 0)
+         pl_rearmed_cbs.gpu_neon.enhancement_enable = 1;
+   }
+
+   var.value = NULL;
+   var.key = "neon_enhancement_no_main";
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) || var.value)
+   {
+      if (strcmp(var.value, "disabled") == 0)
+         pl_rearmed_cbs.gpu_neon.enhancement_no_main = 0;
+      else if (strcmp(var.value, "enabled") == 0)
+         pl_rearmed_cbs.gpu_neon.enhancement_no_main = 1;
+   }
+#endif
+
+	if (in_flight) {
+		// inform core things about possible config changes
+		plugin_call_rearmed_cbs();
+
+		if (GPU_open != NULL && GPU_close != NULL) {
+			GPU_close();
+			GPU_open(&gpuDisp, "PCSX", NULL);
+		}
+
+		dfinput_activate();
+	}
+}
+
 void retro_run(void) 
 {
 	int i;
 
 	input_poll_cb();
+
+	bool updated = false;
+	if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
+		update_variables(true);
+
 	in_keystate = 0;
 	for (i = 0; i < RETRO_PSX_MAP_LEN; i++)
 		if (input_state_cb(1, RETRO_DEVICE_JOYPAD, 0, i))
@@ -510,13 +862,67 @@ void retro_run(void)
 	vout_fb_dirty = 0;
 }
 
+static bool try_use_bios(const char *path)
+{
+	FILE *f;
+	long size;
+	const char *name;
+
+	f = fopen(path, "rb");
+	if (f == NULL)
+		return false;
+
+	fseek(f, 0, SEEK_END);
+	size = ftell(f);
+	fclose(f);
+
+	if (size != 512 * 1024)
+		return false;
+
+	name = strrchr(path, SLASH);
+	if (name++ == NULL)
+		name = path;
+	snprintf(Config.Bios, sizeof(Config.Bios), "%s", name);
+	return true;
+}
+
+#if 1
+#include <sys/types.h>
+#include <dirent.h>
+
+static bool find_any_bios(const char *dirpath, char *path, size_t path_size)
+{
+	DIR *dir;
+	struct dirent *ent;
+	bool ret = false;
+
+	dir = opendir(dirpath);
+	if (dir == NULL)
+		return false;
+
+	while ((ent = readdir(dir))) {
+		if (strncasecmp(ent->d_name, "scph", 4) != 0)
+			continue;
+
+		snprintf(path, path_size, "%s/%s", dirpath, ent->d_name);
+		ret = try_use_bios(path);
+		if (ret)
+			break;
+	}
+	closedir(dir);
+	return ret;
+}
+#else
+#define find_any_bios(...) false
+#endif
+
 void retro_init(void)
 {
 	const char *bios[] = { "scph1001", "scph5501", "scph7001" };
 	const char *dir;
 	char path[256];
-	FILE *f = NULL;
 	int i, ret, level;
+	bool found_bios = false;
 
 	ret = emu_core_preinit();
 	ret |= emu_core_init();
@@ -525,7 +931,7 @@ void retro_init(void)
 		exit(1);
 	}
 
-	vout_buf = malloc(640 * 512 * 2);
+	vout_buf = malloc(VOUT_MAX_WIDTH * VOUT_MAX_HEIGHT * 2);
 
 	if (environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &dir) && dir)
 	{
@@ -533,24 +939,33 @@ void retro_init(void)
 
 		for (i = 0; i < sizeof(bios) / sizeof(bios[0]); i++) {
 			snprintf(path, sizeof(path), "%s/%s.bin", dir, bios[i]);
-			f = fopen(path, "r");
-			if (f != NULL) {
-				snprintf(Config.Bios, sizeof(Config.Bios), "%s.bin", bios[i]);
+			found_bios = try_use_bios(path);
+			if (found_bios)
 				break;
-			}
 		}
+
+		if (!found_bios)
+			found_bios = find_any_bios(dir, path, sizeof(path));
 	}
-	if (f != NULL) {
+	if (found_bios) {
 		SysPrintf("found BIOS file: %s\n", Config.Bios);
-		fclose(f);
 	}
 	else
+	{
 		SysPrintf("no BIOS files found.\n");
+		struct retro_message msg = 
+		{
+			"no BIOS found, expect bugs!",
+			180
+		};
+		environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, (void*)&msg);
+	}
 
 	level = 1;
 	environ_cb(RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL, &level);
 
 	environ_cb(RETRO_ENVIRONMENT_GET_CAN_DUPE, &vout_can_dupe);
+	environ_cb(RETRO_ENVIRONMENT_SET_DISK_CONTROL_INTERFACE, &disk_control);
 
 	/* Set how much slower PSX CPU runs * 100 (so that 200 is 2 times)
 	 * we have to do this because cache misses and some IO penalties
@@ -570,6 +985,8 @@ void retro_init(void)
 	SaveFuncs.write = save_write;
 	SaveFuncs.seek = save_seek;
 	SaveFuncs.close = save_close;
+
+	update_variables(false);
 }
 
 void retro_deinit(void)

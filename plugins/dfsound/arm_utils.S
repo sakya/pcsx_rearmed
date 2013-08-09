@@ -10,22 +10,34 @@
 
 #include "arm_features.h"
 
+#ifdef __MACH__
+.data
+.align 2
+ptr_ChanBuf:   .word ESYM(ChanBuf)
+ptr_SSumLR:    .word ESYM(SSumLR)
+ptr_sRVBStart: .word ESYM(sRVBStart)
+#endif
+
 .text
 .align 2
 
 .macro load_varadr reg var
 #if defined(__ARM_ARCH_7A__) && !defined(__PIC__)
-	movw	\reg, #:lower16:\var
-	movt	\reg, #:upper16:\var
+	movw	\reg, #:lower16:ESYM(\var)
+	movt	\reg, #:upper16:ESYM(\var)
+#elif defined(__ARM_ARCH_7A__) && defined(__MACH__)
+	movw	\reg, #:lower16:(ptr_\var-(1678f+8))
+	movt	\reg, #:upper16:(ptr_\var-(1678f+8))
+1678:
+	ldr	\reg, [pc, \reg]
 #else
-	ldr	\reg, =\var
+	ldr	\reg, =ESYM(\var)
 #endif
 .endm
 
 #ifdef __ARM_NEON__
 
-.global mix_chan @ (int start, int count, int lv, int rv)
-mix_chan:
+FUNCTION(mix_chan): @ (int start, int count, int lv, int rv)
     vmov.32     d14[0], r2
     vmov.32     d14[1], r3             @ multipliers
     mov         r12, r0
@@ -58,8 +70,7 @@ mc_finish:
     bx          lr
 
 
-.global mix_chan_rvb @ (int start, int count, int lv, int rv)
-mix_chan_rvb:
+FUNCTION(mix_chan_rvb): @ (int start, int count, int lv, int rv)
     vmov.32     d14[0], r2
     vmov.32     d14[1], r3             @ multipliers
     mov         r12, r0
@@ -103,8 +114,7 @@ mcr_finish:
 
 #elif defined(HAVE_ARMV5)
 
-.global mix_chan @ (int start, int count, int lv, int rv)
-mix_chan:
+FUNCTION(mix_chan): @ (int start, int count, int lv, int rv)
     stmfd       sp!, {r4-r8,lr}
     orr         r3, r2, r3, lsl #16
     lsl         r3, #1                 @ packed multipliers << 1
@@ -133,8 +143,7 @@ mc_finish:
     ldmfd       sp!, {r4-r8,pc}
 
 
-.global mix_chan_rvb @ (int start, int count, int lv, int rv)
-mix_chan_rvb:
+FUNCTION(mix_chan_rvb): @ (int start, int count, int lv, int rv)
     stmfd       sp!, {r4-r8,lr}
     orr         lr, r2, r3, lsl #16
     lsl         lr, #1

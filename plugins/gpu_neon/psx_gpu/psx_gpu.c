@@ -4344,7 +4344,7 @@ void render_sprite(psx_gpu_struct *psx_gpu, s32 x, s32 y, u32 u, u32 v,
 }
 
 #define draw_pixel_line_mask_evaluate_yes()                                    \
-  if(*vram_ptr & 0x8000)                                                       \
+  if((*vram_ptr & 0x8000) == 0)                                                \
 
 #define draw_pixel_line_mask_evaluate_no()                                     \
     
@@ -5056,6 +5056,7 @@ void initialize_psx_gpu(psx_gpu_struct *psx_gpu, u16 *vram)
   memset(psx_gpu->vram_ptr, 0, sizeof(u16) * 1024 * 512);
 
   initialize_reciprocal_table();
+  psx_gpu->reciprocal_table_ptr = reciprocal_table;
 
   //    00 01 10 11
   // 00  0  4  1  5

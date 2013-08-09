@@ -25,4 +25,28 @@
 
 /* no need for HAVE_NEON - GCC defines __ARM_NEON__ consistently */
 
+/* global function/external symbol */
+#ifndef __MACH__
+#define ESYM(name) name
+
+#define FUNCTION(name) \
+  .globl name; \
+  .type name, %function; \
+  name
+
+#define EXTRA_UNSAVED_REGS
+
+#else
+#define ESYM(name) _##name
+
+#define FUNCTION(name) \
+  .globl ESYM(name); \
+  name: \
+  ESYM(name)
+
+// r7 is preserved, but add it for EABI alignment..
+#define EXTRA_UNSAVED_REGS r7, r9,
+
+#endif
+
 #endif /* __ARM_FEATURES_H__ */

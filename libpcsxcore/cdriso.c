@@ -34,6 +34,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 #endif
+#include <errno.h>
 #include <zlib.h>
 
 unsigned int cdrIsoMultidiskCount;
@@ -327,6 +328,14 @@ static int parsetoc(const char *isofile) {
 				return -1;
 			}
 		}
+		// check if it's really a TOC named as a .cue
+		fgets(linebuf, sizeof(linebuf), fi);
+		token = strtok(linebuf, " ");
+		if (token && strncmp(token, "CD", 2) != 0 && strcmp(token, "CATALOG") != 0) {
+			fclose(fi);
+			return -1;
+		}
+		fseek(fi, 0, SEEK_SET);
 	}
 
 	memset(&ti, 0, sizeof(ti));
@@ -1205,6 +1214,8 @@ static void PrintTracks(void) {
 // file for playback
 static long CALLBACK ISOopen(void) {
 	boolean isMode1ISO = FALSE;
+	char alt_bin_filename[MAXPATHLEN];
+	const char *bin_filename;
 
 	if (cdHandle != NULL) {
 		return 0; // it's already open
@@ -1212,6 +1223,8 @@ static long CALLBACK ISOopen(void) {
 
 	cdHandle = fopen(GetIsoFile(), "rb");
 	if (cdHandle == NULL) {
+		SysPrintf(_("Could't open '%s' for reading: %s\n"),
+			GetIsoFile(), strerror(errno));
 		return -1;
 	}
 
@@ -1227,10 +1240,7 @@ static long CALLBACK ISOopen(void) {
 	CDR_getBuffer = ISOgetBuffer;
 	cdimg_read_func = cdread_normal;
 
-	if (parsecue(GetIsoFile()) == 0) {
-		SysPrintf("[+cue]");
-	}
-	else if (parsetoc(GetIsoFile()) == 0) {
+	if (parsetoc(GetIsoFile()) == 0) {
 		SysPrintf("[+toc]");
 	}
 	else if (parseccd(GetIsoFile()) == 0) {
@@ -1238,6 +1248,9 @@ static long CALLBACK ISOopen(void) {
 	}
 	else if (parsemds(GetIsoFile()) == 0) {
 		SysPrintf("[+mds]");
+	}
+	else if (parsecue(GetIsoFile()) == 0) {
+		SysPrintf("[+cue]");
 	}
 	if (handlepbp(GetIsoFile()) == 0) {
 		SysPrintf("[pbp]");
@@ -1257,8 +1270,36 @@ static long CALLBACK ISOopen(void) {
 		SysPrintf("[+sbi]");
 	}
 
-	// guess whether it is mode1/2048
 	fseek(cdHandle, 0, SEEK_END);
+
+	// maybe user selected metadata file instead of main .bin ..
+	bin_filename = GetIsoFile();
+	if (ftell(cdHandle) < 2352 * 0x10) {
+		static const char *exts[] = { ".bin", ".BIN", ".img", ".IMG" };
+		FILE *tmpf = NULL;
+		size_t i;
+		char *p;
+
+		strncpy(alt_bin_filename, bin_filename, sizeof(alt_bin_filename));
+		alt_bin_filename[MAXPATHLEN - 1] = '\0';
+		if (strlen(alt_bin_filename) >= 4) {
+			p = alt_bin_filename + strlen(alt_bin_filename) - 4;
+			for (i = 0; i < sizeof(exts) / sizeof(exts[0]); i++) {
+				strcpy(p, exts[i]);
+				tmpf = fopen(alt_bin_filename, "rb");
+				if (tmpf != NULL)
+					break;
+			}
+		}
+		if (tmpf != NULL) {
+			bin_filename = alt_bin_filename;
+			fclose(cdHandle);
+			cdHandle = tmpf;
+			fseek(cdHandle, 0, SEEK_END);
+		}
+	}
+
+	// guess whether it is mode1/2048
 	if (ftell(cdHandle) % 2048 == 0) {
 		unsigned int modeTest = 0;
 		fseek(cdHandle, 0, SEEK_SET);
@@ -1281,7 +1322,7 @@ static long CALLBACK ISOopen(void) {
 
 	// make sure we have another handle open for cdda
 	if (numtracks > 1 && ti[1].handle == NULL) {
-		ti[1].handle = fopen(GetIsoFile(), "rb");
+		ti[1].handle = fopen(bin_filename, "rb");
 	}
 	cdda_cur_sector = 0;
 	cdda_file_offset = 0;
@@ -1316,7 +1357,11 @@ static long CALLBACK ISOclose(void) {
 		}
 	}
 	numtracks = 0;
+	ti[1].type = 0;
 	UnloadSBI();
+
+	memset(cdbuffer, 0, sizeof(cdbuffer));
+	CDR_getBuffer = ISOgetBuffer;
 
 	return 0;
 }
@@ -1400,6 +1445,7 @@ static void DecodeRawSubData(void) {
 // uses bcd format
 static long CALLBACK ISOreadTrack(unsigned char *time) {
 	int sector = MSF2SECT(btoi(time[0]), btoi(time[1]), btoi(time[2]));
+	long ret;
 
 	if (cdHandle == NULL) {
 		return -1;
@@ -1414,7 +1460,9 @@ static long CALLBACK ISOreadTrack(unsigned char *time) {
 		}
 	}
 
-	cdimg_read_func(cdHandle, 0, cdbuffer, sector);
+	ret = cdimg_read_func(cdHandle, 0, cdbuffer, sector);
+	if (ret < 0)
+		return -1;
 
 	if (subHandle != NULL) {
 		fseek(subHandle, sector * SUB_FRAMESIZE, SEEK_SET);

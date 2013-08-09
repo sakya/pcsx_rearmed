@@ -52,8 +52,9 @@ retry:
 		goto out;
 	}
 
-	if (is_fixed)
-		flags |= MAP_FIXED;
+	/* avoid MAP_FIXED, it overrides existing mappings.. */
+	/* if (is_fixed)
+		flags |= MAP_FIXED; */
 
 	req = (void *)addr;
 	ret = mmap(req, size, PROT_READ | PROT_WRITE, flags, -1, 0);
@@ -64,6 +65,11 @@ out:
 	if (addr != 0 && ret != (void *)addr) {
 		SysMessage("psxMap: warning: wanted to map @%08x, got %p\n",
 			addr, ret);
+
+		if (is_fixed) {
+			psxUnmap(ret, size, tag);
+			return NULL;
+		}
 
 		if (ret != NULL && ((addr ^ (long)ret) & 0x00ffffff)
 		    && !tried_to_align)
@@ -89,7 +95,8 @@ void psxUnmap(void *ptr, size_t size, enum psxMapTag tag)
 		return;
 	}
 
-	munmap(ptr, size);
+	if (ptr)
+		munmap(ptr, size);
 }
 
 s8 *psxM = NULL; // Kernel & User Memory (2 Meg)
@@ -129,8 +136,13 @@ int psxMemInit() {
 
 	psxM = psxMap(0x80000000, 0x00210000, 1, MAP_TAG_RAM);
 #ifndef RAM_FIXED
+#ifdef __BLACKBERRY_QNX__
+	if (psxM == NULL)
+		psxM = psxMap(0x77000000, 0x00210000, 0, MAP_TAG_RAM);
+#else
 	if (psxM == NULL)
 		psxM = psxMap(0x78000000, 0x00210000, 0, MAP_TAG_RAM);
+#endif
 #endif
 	if (psxM == NULL) {
 		SysMessage(_("mapping main RAM failed"));
@@ -144,6 +156,7 @@ int psxMemInit() {
 	if (psxMemRLUT == NULL || psxMemWLUT == NULL || 
 		psxR == NULL || psxP == NULL || psxH != (void *)0x1f800000) {
 		SysMessage(_("Error allocating memory!"));
+		psxMemShutdown();
 		return -1;
 	}
 
@@ -197,12 +210,12 @@ void psxMemReset() {
 }
 
 void psxMemShutdown() {
-	psxUnmap(psxM, 0x00210000, MAP_TAG_RAM);
-	psxUnmap(psxH, 0x1f800000, MAP_TAG_OTHER);
-	psxUnmap(psxR, 0x80000, MAP_TAG_OTHER);
+	psxUnmap(psxM, 0x00210000, MAP_TAG_RAM); psxM = NULL;
+	psxUnmap(psxH, 0x10000, MAP_TAG_OTHER); psxH = NULL;
+	psxUnmap(psxR, 0x80000, MAP_TAG_OTHER); psxR = NULL;
 
-	free(psxMemRLUT);
-	free(psxMemWLUT);
+	free(psxMemRLUT); psxMemRLUT = NULL;
+	free(psxMemWLUT); psxMemWLUT = NULL;
 }
 
 static int writeok = 1;
@@ -212,8 +225,8 @@ u8 psxMemRead8(u32 mem) {
 	u32 t;
 
 	t = mem >> 16;
-	if (t == 0x1f80) {
-		if (mem < 0x1f801000)
+	if (t == 0x1f80 || t == 0x9f80 || t == 0xbf80) {
+		if ((mem & 0xffff) < 0x400)
 			return psxHu8(mem);
 		else
 			return psxHwRead8(mem);
@@ -237,8 +250,8 @@ u16 psxMemRead16(u32 mem) {
 	u32 t;
 
 	t = mem >> 16;
-	if (t == 0x1f80) {
-		if (mem < 0x1f801000)
+	if (t == 0x1f80 || t == 0x9f80 || t == 0xbf80) {
+		if ((mem & 0xffff) < 0x400)
 			return psxHu16(mem);
 		else
 			return psxHwRead16(mem);
@@ -262,8 +275,8 @@ u32 psxMemRead32(u32 mem) {
 	u32 t;
 
 	t = mem >> 16;
-	if (t == 0x1f80) {
-		if (mem < 0x1f801000)
+	if (t == 0x1f80 || t == 0x9f80 || t == 0xbf80) {
+		if ((mem & 0xffff) < 0x400)
 			return psxHu32(mem);
 		else
 			return psxHwRead32(mem);
@@ -287,8 +300,8 @@ void psxMemWrite8(u32 mem, u8 value) {
 	u32 t;
 
 	t = mem >> 16;
-	if (t == 0x1f80) {
-		if (mem < 0x1f801000)
+	if (t == 0x1f80 || t == 0x9f80 || t == 0xbf80) {
+		if ((mem & 0xffff) < 0x400)
 			psxHu8(mem) = value;
 		else
 			psxHwWrite8(mem, value);
@@ -314,8 +327,8 @@ void psxMemWrite16(u32 mem, u16 value) {
 	u32 t;
 
 	t = mem >> 16;
-	if (t == 0x1f80) {
-		if (mem < 0x1f801000)
+	if (t == 0x1f80 || t == 0x9f80 || t == 0xbf80) {
+		if ((mem & 0xffff) < 0x400)
 			psxHu16ref(mem) = SWAPu16(value);
 		else
 			psxHwWrite16(mem, value);
@@ -342,8 +355,8 @@ void psxMemWrite32(u32 mem, u32 value) {
 
 //	if ((mem&0x1fffff) == 0x71E18 || value == 0x48088800) SysPrintf("t2fix!!\n");
 	t = mem >> 16;
-	if (t == 0x1f80) {
-		if (mem < 0x1f801000)
+	if (t == 0x1f80 || t == 0x9f80 || t == 0xbf80) {
+		if ((mem & 0xffff) < 0x400)
 			psxHu32ref(mem) = SWAPu32(value);
 		else
 			psxHwWrite32(mem, value);
@@ -400,8 +413,8 @@ void *psxMemPointer(u32 mem) {
 	u32 t;
 
 	t = mem >> 16;
-	if (t == 0x1f80) {
-		if (mem < 0x1f801000)
+	if (t == 0x1f80 || t == 0x9f80 || t == 0xbf80) {
+		if ((mem & 0xffff) < 0x400)
 			return (void *)&psxH[mem];
 		else
 			return NULL;

@@ -8,11 +8,18 @@
  * See the COPYING file in the top-level directory.
  */
 
+#include "arm_features.h"
+
+/* sanity check */
+#ifndef __ARM_NEON__
+#error Compiling NEON code, but appropriate preprocessor flag is missing
+#error This usually means -mfpu=neon or -mfloat-abi= is not correctly specified
+#endif
+
 .text
 .align 2
 
-.global bgr555_to_rgb565
-bgr555_to_rgb565:
+FUNCTION(bgr555_to_rgb565):
     pld         [r1]
     mov         r3, #0x07c0
     vdup.16     q15, r3
@@ -74,8 +81,7 @@ btr16_end16:
     bx          lr
 
 
-.global bgr888_to_rgb888
-bgr888_to_rgb888:
+FUNCTION(bgr888_to_rgb888):
     pld         [r1]
     @ r2 /= 48
     mov         r2, r2, lsr #4
@@ -96,8 +102,7 @@ bgr888_to_rgb888:
     bx          lr
 
 
-.global bgr888_to_rgb565
-bgr888_to_rgb565:
+FUNCTION(bgr888_to_rgb565):
     pld         [r1]
     @ r2 /= 48
     mov         r2, r2, lsr #4
@@ -129,8 +134,7 @@ bgr888_to_rgb565:
     bx          lr
 
 
-.global rgb888_to_rgb565
-rgb888_to_rgb565:
+FUNCTION(rgb888_to_rgb565):
     pld         [r1]
     @ r2 /= 48
     mov         r2, r2, lsr #4

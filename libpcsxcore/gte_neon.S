@@ -5,26 +5,12 @@
  * See the COPYING file in the top-level directory.
  */
 
+#include "arm_features.h"
+#include "new_dynarec/linkage_offsets.h"
 
-.bss
-.align 6 @ cacheline
-
-scratch:
-.rept 8*8*2/4
-    .word 0
-.endr
-
+.syntax unified
 .text
 .align 2
-
-.macro ldr_scratch rd
-#ifndef __PIC__
-    movw        \rd, #:lower16:scratch
-    movt        \rd, #:upper16:scratch
-#else
-    ldr         \rd, =scratch
-#endif
-.endm
 
 @ XXX: gteMAC calc shouldn't be saturating, but it is here
 
@@ -143,12 +129,11 @@ scratch:
     vqmovn.s32  d10, q4        @ gteIR|123; losing 2 cycles?
 .endm
 
-.global gteRTPS_neon @ r0=CP2 (d,c),
-gteRTPS_neon:
+FUNCTION(gteRTPS_neon): @ r0=CP2 (d,c),
     push        {r4-r6,lr}
 
 @    fmrx        r4, fpscr      @ vmrs? at least 40 cycle hit
-    ldr_scratch r1
+    ldr		r1, [r0, #LO_cop2_to_scratch_buf]
     mov         r12, #0
 
     vldmia      r0, {d8}       @ VXYZ(0)
@@ -271,11 +256,11 @@ gteRTPS_neon:
     orrne       lr, #(1<<13)   @ limG2
     orrne       lr, #(1<<31)
     adds        r2, r4, #1
-    addvcs      r3, r5, #1
+    addsvc      r3, r5, #1
     orrvs       lr, #(1<<16)   @ F
     orrvs       lr, #(1<<31)
     subs        r2, r4, #1
-    subvcs      r3, r5, #1
+    subsvc      r3, r5, #1
     orrvs       lr, #(1<<31)
 
     ldr         r4, [r0, #4*24] @ gteMAC0
@@ -297,11 +282,10 @@ gteRTPS_neon:
  
 
 
-.global gteRTPT_neon @ r0=CP2 (d,c),
-gteRTPT_neon:
+FUNCTION(gteRTPT_neon): @ r0=CP2 (d,c),
     push        {r4-r11,lr}
 
-    ldr_scratch r1
+    ldr		r1, [r0, #LO_cop2_to_scratch_buf]
     mov         r12, #0
 
     rtpx_preload
@@ -506,13 +490,13 @@ gteRTPT_neon:
     add         r2, r4, #0x400<<16 @ min fSX
     add         r3, r6, #0x400<<16 @ max fSX
     lsrs        r2, #16+11
-    lsreqs      r3, #16+11
+    lsrseq      r3, #16+11
     orrne       lr, #(1<<31)   @ limG1
     orrne       lr, #(1<<14)
     add         r2, r5, #0x400<<16 @ min fSY
     add         r3, r7, #0x400<<16 @ max fSY
     lsrs        r2, #16+11
-    lsreqs      r3, #16+11
+    lsrseq      r3, #16+11
     orrne       lr, #(1<<31)   @ limG2
     orrne       lr, #(1<<13)
     adds        r2, r9, #1
@@ -544,8 +528,7 @@ gteRTPT_neon:
 @ r4,r5 = VXYZ(v) packed
 @ r6 = &MX11(mx)
 @ r7 = &CV1(cv)
-.global gteMVMVA_part_neon
-gteMVMVA_part_neon:
+FUNCTION(gteMVMVA_part_neon):
     uxth        r5, r5
     vmov.32     d8[0], r4
     vmov.32     d8[1], r5       @ VXYZ(v)
@@ -592,8 +575,7 @@ gteMVMVA_part_neon:
 
 
 @ get flags after gteMVMVA_part_neon operation
-.global gteMACtoIR_flags_neon @ r0=CP2 (d,c), r1=lm
-gteMACtoIR_flags_neon:
+FUNCTION(gteMACtoIR_flags_neon): @ r0=CP2 (d,c), r1=lm
     push        {r4,r5,lr}
     tst         r1, r1         @ lm
     mov         lr, #0         @ gteFLAG
